@@ -46,6 +46,12 @@
 #define END_FLAG		(1 << 20)
 
 #define FUNCTION_FLAG		(1 << 21)
+
+#define PLAY_FLAG		(1 << 22)
+#define REWIND_FLAG		(1 << 23)
+#define FASTFORWARD_FLAG		(1 << 24)
+#define STOP_FLAG		(1 << 25)
+
 // dont exceed 32!!
 
 
@@ -73,6 +79,7 @@ protected:
 	inline void SetKeyboardFlag(unsigned flag) { keyboardFlags |= flag; }
 	inline bool KeyboardFlag(unsigned flag) { return (keyboardFlags & flag) != 0; }
 	inline void SetButtonFlag(unsigned flag) { buttonFlags |= flag; }
+	inline void ClearButtonFlag(unsigned flag) { buttonFlags &= ~flag; }
 	inline bool ButtonFlag(unsigned flag) { return (buttonFlags & flag) != 0; }
 
 public:
@@ -83,6 +90,7 @@ public:
 	void CheckKeyboardEmulationMode(unsigned numberOfImages, unsigned numberOfImagesMax);	// The other core will call this
 	bool CheckButtonsBrowseMode();
 	void CheckButtonsEmulationMode();
+	void CheckButtonsDatasetteMode();
 
 	void WaitForClearButtons();
 
@@ -133,6 +141,28 @@ public:
 	{
 		return KeyboardFlag(PREV_FLAG) | /*UartFlag(PREV_FLAG) |*/ ButtonFlag(PREV_FLAG);
 	}
+#endif
+#if defined(TAPESUPPORT)
+	inline bool PlayTape()
+	{
+		return ButtonFlag(PLAY_FLAG);
+	}
+
+	inline bool RewindTape()
+	{
+		return ButtonFlag(REWIND_FLAG);
+	}
+
+	inline bool FastForwardTape()
+	{
+		return ButtonFlag(FASTFORWARD_FLAG);
+	}
+
+	inline bool StopTape()
+	{
+		return ButtonFlag(STOP_FLAG);
+	}
+
 #endif
 	inline bool AutoLoad() { return KeyboardFlag(AUTOLOAD_FLAG); }
 

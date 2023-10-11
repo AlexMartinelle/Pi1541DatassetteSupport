@@ -115,7 +115,16 @@ enum PIGPIO
 	PIGPIO_IN_ATN = 24,		// 18
 	PIGPIO_IN_DATA = 25,	// 22
 	PIGPIO_IN_CLOCK = 26,	// 37
-	PIGPIO_IN_BUTTON1 = 27	// 13 Common
+	PIGPIO_IN_BUTTON1 = 27,	// 13 Common
+#if not defined(TAPESUPPORT)
+#define TAPESUPPORT 1
+#endif
+#if defined(TAPESUPPORT)
+	PIGPIO_IN_DATASETTE_MOTOR = 9,
+	PIGPIO_OUT_DATASETTE_READ = 11,
+	PIGPIO_IN_DATASETTE_WRITE = 8,
+	PIGPIO_OUT_DATASETTE_SENSE = 7,
+#endif
 };
 #else
 //Added GPIO bindings for Raspberry Pi 1B Rev 1/2 (only 26 I/O ports)
@@ -195,7 +204,14 @@ enum PIGPIOMasks
 	PIGPIO_MASK_IN_BUTTON3 = 1 << PIGPIO_IN_BUTTON3,
 	PIGPIO_MASK_IN_BUTTON4 = 1 << PIGPIO_IN_BUTTON4,
 	PIGPIO_MASK_IN_BUTTON5 = 1 << PIGPIO_IN_BUTTON5,
-	PIGPIO_MASK_ANY_BUTTON = PIGPIO_MASK_IN_BUTTON1 | PIGPIO_MASK_IN_BUTTON2 | PIGPIO_MASK_IN_BUTTON3 | PIGPIO_MASK_IN_BUTTON4 | PIGPIO_MASK_IN_BUTTON5
+	PIGPIO_MASK_ANY_BUTTON = PIGPIO_MASK_IN_BUTTON1 | PIGPIO_MASK_IN_BUTTON2 | PIGPIO_MASK_IN_BUTTON3 | PIGPIO_MASK_IN_BUTTON4 | PIGPIO_MASK_IN_BUTTON5,
+
+#if defined(TAPESUPPORT)
+	PIGPIO_MASK_IN_DATASETTE_MOTOR_ = 1 << PIGPIO_IN_DATASETTE_MOTOR,
+	PIGPIO_MASK_IN_DATASETTE_WRITE_ = 1 << PIGPIO_IN_DATASETTE_WRITE,
+	PIGPIO_MASK_OUT_DATASETTE_READ_ = 1 << PIGPIO_OUT_DATASETTE_READ,
+	PIGPIO_MASK_OUT_DATASETTE_SENSE_ = 1 << PIGPIO_OUT_DATASETTE_SENSE,
+#endif
 };
 
 static const unsigned ButtonPinFlags[5] = { PIGPIO_MASK_IN_BUTTON1, PIGPIO_MASK_IN_BUTTON2, PIGPIO_MASK_IN_BUTTON3, PIGPIO_MASK_IN_BUTTON4, PIGPIO_MASK_IN_BUTTON5 };
@@ -337,6 +353,13 @@ public:
 			RPI_SetGpioPinFunction((rpi_gpio_pin_t)PIGPIO_OUT_CLOCK, FS_OUTPUT);
 			RPI_SetGpioPinFunction((rpi_gpio_pin_t)PIGPIO_OUT_DATA, FS_OUTPUT);
 			RPI_SetGpioPinFunction((rpi_gpio_pin_t)PIGPIO_OUT_SRQ, FS_OUTPUT);
+		
+#if defined(TAPESUPPORT)
+			RPI_SetGpioPinFunction((rpi_gpio_pin_t)PIGPIO_IN_DATASETTE_MOTOR, FS_INPUT);
+			RPI_SetGpioPinFunction((rpi_gpio_pin_t)PIGPIO_IN_DATASETTE_WRITE, FS_INPUT);
+			RPI_SetGpioPinFunction((rpi_gpio_pin_t)PIGPIO_OUT_DATASETTE_READ, FS_OUTPUT);
+			RPI_SetGpioPinFunction((rpi_gpio_pin_t)PIGPIO_OUT_DATASETTE_SENSE, FS_OUTPUT);
+#endif
 		}
 	
 #if not defined(EXPERIMENTALZERO)
@@ -372,19 +395,31 @@ public:
 		RPI_GpioBase->GPPUDCLK0 = 0;
 
 		//ROTARY: Added for rotary encoder support - 09/05/2019 by Geo...
-		if (IEC_Bus::rotaryEncoderEnable == true)
+		//if (IEC_Bus::rotaryEncoderEnable == true)
+		//{
+		//	//ROTARY: Added for rotary encoder inversion (Issue#185) - 08/13/2020 by Geo...
+		//	if (IEC_Bus::rotaryEncoderInvert == true)
+		//	{
+		//		IEC_Bus::rotaryEncoder.Initialize(RPI_GPIO23, RPI_GPIO22, RPI_GPIO27);
+		//	}
+		//	else
+		//	{
+		//		IEC_Bus::rotaryEncoder.Initialize(RPI_GPIO22, RPI_GPIO23, RPI_GPIO27);
+		//	}
+		//}
+#if defined(TAPESUPPORT)
+		//Enable pull downs for datasette inputs
+		RPI_GpioBase->GPPUD = 1;
+		for (index = 0; index < 160; ++index)
 		{
-			//ROTARY: Added for rotary encoder inversion (Issue#185) - 08/13/2020 by Geo...
-			if (IEC_Bus::rotaryEncoderInvert == true)
-			{
-				IEC_Bus::rotaryEncoder.Initialize(RPI_GPIO23, RPI_GPIO22, RPI_GPIO27);
-			}
-			else
-			{
-				IEC_Bus::rotaryEncoder.Initialize(RPI_GPIO22, RPI_GPIO23, RPI_GPIO27);
-			}
 		}
-
+		RPI_GpioBase->GPPUDCLK0 = PIGPIO_MASK_IN_DATASETTE_MOTOR_/* | PIGPIO_MASK_IN_DATASETTE_WRITE_ | PIGPIO_MASK_OUT_DATASETTE_READ_ | PIGPIO_MASK_OUT_DATASETTE_SENSE_*/;
+		for (index = 0; index < 160; ++index)
+		{
+		}
+		RPI_GpioBase->GPPUD = 0;
+		RPI_GpioBase->GPPUDCLK0 = 0;
+#endif
 	}
 
 	static inline void LetSRQBePulledHigh()
@@ -393,10 +428,11 @@ public:
 		RefreshOuts1581();
 	}
 
-#if defined(EXPERIMENTALZERO)
-	static inline bool AnyButtonPressed()
+#if defined(TAPESUPPORT)
+	static inline unsigned ReadGPIO()
 	{
-		return ((gplev0 & PIGPIO_MASK_ANY_BUTTON) != PIGPIO_MASK_ANY_BUTTON);
+		gplev0 = read32(ARM_GPIO_GPLEV0);
+		return gplev0;
 	}
 #endif
 
@@ -431,6 +467,7 @@ public:
 			inputRepeat[index] = 0;
 			inputRepeatPrev[index] = 0;
 		}
+
 	}
 
 	
@@ -477,6 +514,9 @@ public:
 	static void ReadBrowseMode(void);
 	static void ReadGPIOUserInput(void);
 	static void ReadEmulationMode1541(void);
+#if defined(TAPESUPPORT)
+	static void ReadButtonsDatasetteMode(void);
+#endif
 	static void ReadEmulationMode1581(void);
 
 	static void WaitUntilReset(void)
@@ -700,6 +740,11 @@ public:
 
 	static bool OutputLED;
 	static bool OutputSound;
+
+	static u32 PIGPIO_MASK_IN_DATASETTE_MOTOR;
+	static u32 PIGPIO_MASK_OUT_DATASETTE_READ;
+	static u32 PIGPIO_MASK_IN_DATASETTE_WRITE;
+	static u32 PIGPIO_MASK_OUT_DATASETTE_SENSE;
 
 private:
 	static u32 oldClears;

@@ -142,6 +142,34 @@ void InputMappings::WaitForClearButtons()
 	} while (insertButtonPressedPrev || enterButtonPressedPrev);
 }
 
+void InputMappings::CheckButtonsDatasetteMode()
+{
+	buttonFlags = 0;
+	if (IEC_Bus::GetInputButtonRepeating(INPUT_BUTTON_UP))
+		SetButtonFlag(REWIND_FLAG);
+	else if (IEC_Bus::GetInputButtonRepeating(INPUT_BUTTON_DOWN))
+		SetButtonFlag(FASTFORWARD_FLAG);
+	//else if (IEC_Bus::GetInputButtonRepeating(INPUT_BUTTON_ENTER))
+	//	SetButtonFlag(PLAY_FLAG);
+	//else if (IEC_Bus::GetInputButtonRepeating(INPUT_BUTTON_INSERT))
+	//	SetButtonFlag(STOP_FLAG);
+	else if (IEC_Bus::GetInputButtonPressed(INPUT_BUTTON_BACK))
+		SetButtonFlag(ESC_FLAG);
+	else
+	{
+		// edge detection
+		insertButtonPressed = !IEC_Bus::GetInputButtonReleased(INPUT_BUTTON_INSERT);
+		if (insertButtonPressedPrev && !insertButtonPressed)
+			SetButtonFlag(STOP_FLAG);
+		insertButtonPressedPrev = insertButtonPressed;
+
+		enterButtonPressed = !IEC_Bus::GetInputButtonReleased(INPUT_BUTTON_ENTER);
+		if (enterButtonPressedPrev && !enterButtonPressed)
+			SetButtonFlag(PLAY_FLAG);
+		enterButtonPressedPrev = enterButtonPressed;
+	}
+}
+
 void InputMappings::CheckButtonsEmulationMode()
 {
 	buttonFlags = 0;

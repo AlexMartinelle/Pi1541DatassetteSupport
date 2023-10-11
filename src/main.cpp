@@ -40,6 +40,13 @@ extern "C"
 #include "diskio.h"
 #include "Pi1541.h"
 #include "Pi1581.h"
+#if not defined(TAPESUPPORT)
+#define TAPESUPPORT 1
+#endif
+
+#if defined(TAPESUPPORT)
+#include "Datasette.h"
+#endif
 #include "FileBrowser.h"
 #include "ScreenLCD.h"
 #include "SpinLock.h"
@@ -79,7 +86,10 @@ enum EmulatingMode
 {
 	IEC_COMMANDS,
 	EMULATING_1541,
-	EMULATING_1581
+	EMULATING_1581,
+#if defined(TAPESUPPORT)
+	EMULATING_DATASETTE
+#endif
 };
 
 volatile EmulatingMode emulating;
@@ -383,6 +393,7 @@ void UpdateLCD(const char* track, unsigned temperature)
 #endif
 	}
 }
+
 
 // This runs on core0 and frees up core1 to just run the emulator.
 // Care must be taken not to crowd out the shared cache with core1 as this could slow down core1 so that it no longer can perform its duties in the 1us timings it requires.
@@ -776,6 +787,398 @@ void CheckAutoMountImage(EXIT_TYPE reset_reason , FileBrowser* fileBrowser)
 		}
 	}
 }
+
+void DisplayMessage(int x, int y, bool LCD, const char* message, u32 textColour, u32 backgroundColour)
+{
+#if not defined(EXPERIMENTALZERO)
+	char buffer[256] = { 0 };
+
+	if (!LCD)
+	{
+		x = screen.ScaleX(x);
+		y = screen.ScaleY(y);
+
+		screen.PrintText(false, x, y, (char*)message, textColour, backgroundColour);
+	}
+	else if (screenLCD)
+	{
+		RGBA BkColour = RGBA(0, 0, 0, 0xFF);
+
+		core0RefreshingScreen.Acquire();
+
+		screenLCD->Clear(BkColour);
+		screenLCD->PrintText(false, x, y, (char*)message, textColour, backgroundColour);
+		screenLCD->SwapBuffers();
+
+		core0RefreshingScreen.Release();
+	}
+#else
+	RGBA BkColour = RGBA(0, 0, 0, 0xFF);
+
+	screenLCD->Clear(BkColour);
+	screenLCD->PrintText(false, x, y, (char*)message, textColour, backgroundColour);
+	screenLCD->SwapBuffers();
+
+#endif
+}
+
+
+#if defined(TAPESUPPORT)
+#define WHITE RGBA(0xff, 0xff, 0xff, 0xff)
+#define BLACK RGBA(0x00, 0x00, 0x00, 0x00)
+
+void DisplayTwoRows(const char* row1, const char* row2)
+{
+	if (screenLCD)
+	{
+		screenLCD->Clear(BLACK);
+		screenLCD->PrintText(false, 0, 0, const_cast<char*>(row1), BLACK, WHITE);
+		screenLCD->PrintText(false, 0, 24, const_cast<char*>(row2), WHITE, BLACK);
+		screenLCD->SwapBuffers();
+	}
+}
+
+void DisplayTwoRowsWithCounter(const char* row1, const char* row2, const int tapeCounter)
+{
+	static char buffer[256];
+	snprintf(buffer, 256, row1, tapeCounter);
+	DisplayTwoRows(buffer, fileBrowserSelectedName);
+}
+
+void DisplayTwoRowsWithCounterLong(const char* row1, const char* row2, const long long tapeCounter)
+{
+	static char buffer[256];
+	snprintf(buffer, 256, row1, tapeCounter);
+	DisplayTwoRows(buffer, fileBrowserSelectedName);
+}
+
+void DisplayLoadingMessage(const char* tapeName, int tapeCounter)
+{
+	if (tapeCounter > 0)
+	{
+		DisplayTwoRowsWithCounter("LOADING [%d]", fileBrowserSelectedName, tapeCounter);
+	}
+	else
+		DisplayTwoRows("LOADING", fileBrowserSelectedName);
+
+}
+
+EXIT_TYPE EmulateDatasette()
+{
+	if (fileBrowserSelectedName == nullptr)
+		return EXIT_UNKNOWN;
+
+	write32(ARM_GPIO_GPSET0, IEC_Bus::PIGPIO_MASK_OUT_DATASETTE_SENSE);
+
+	bool oldLED = false;
+	unsigned ctBefore = 0;
+	unsigned ctAfter = 0;
+	unsigned clears = 0;
+	unsigned oldClears = 0;
+	unsigned sets = 0;
+	unsigned oldSets = 0;
+	signed abDiff = 0;
+	int resetCount = 0;
+	
+
+	DisplayTwoRows("OPENING", fileBrowserSelectedName);
+
+	// Force an update on all the buttons now before we start emulation mode. 
+	IEC_Bus::ReadGPIO();
+	IEC_Bus::ReadButtonsDatasetteMode();
+
+	IEC_Bus::OutputLED = false;	
+
+	bool buttonState = false;
+	bool prevButtonState = false;
+
+	PiDevice::Datasette datasette(screenLCD);
+
+	auto error = datasette.LoadTape(fileBrowserSelectedName);
+	if (error != PiDevice::Datasette::ErrorState::None)
+	{
+		if (screenLCD)
+		{
+			char buffer[256];
+			snprintf(buffer, 256, "ERROR:%d", static_cast<int>(error));
+			DisplayMessage(0, 0, true, buffer, WHITE, BLACK);
+		}
+
+		return EXIT_UNKNOWN;
+	}
+
+	long long ts = datasette.TapeSize() / 1024;
+	DisplayTwoRowsWithCounterLong("INSERTED[%lld]", fileBrowserSelectedName, ts);
+
+	bool isDirty = false;
+	int oldMcPassed = 0;
+	PiDevice::Datasette::Button prevDatasetteButtonState = PiDevice::Datasette::Button::None;
+	ctAfter = read32(ARM_SYSTIMER_CLO);
+	bool motorOn = false;
+	int selectedIndex = -2;
+	const auto fontHeight = screenLCD == nullptr ? 8 : screenLCD->GetFontHeight();
+	const int rows = screenLCD == nullptr ? 3 : screenLCD->Height() / fontHeight;
+	int menuStartRow = -2;
+	int currentScreenRow = 0;
+	int tapeCounter = 0;
+	int prevTapeCounter = -1;
+	while (true)
+	{
+		ctBefore = ctAfter;
+		do
+		{
+			ctAfter = read32(ARM_SYSTIMER_CLO);
+			abDiff = static_cast<signed>(ctAfter - ctBefore);
+		} while (abDiff < 1);
+
+		auto progress = datasette.Update(abDiff);
+
+		if (__builtin_expect(IEC_Bus::IsReset(), false))
+			resetCount++;
+		else
+			resetCount = 0;
+
+		if ((resetCount > 10))
+		{
+			return EXIT_RESET;
+		}
+		
+		IEC_Bus::ReadButtonsDatasetteMode();
+		inputMappings->CheckButtonsDatasetteMode();
+
+		PiDevice::Datasette::Button datasetteButtonState = datasette.ButtonState();
+		if (prevDatasetteButtonState != datasetteButtonState)
+			isDirty = true;
+		prevDatasetteButtonState = datasetteButtonState;
+
+		int mcPassed = datasette.MegaCyclesPassed();//Quickly check if a second has passed on the tape
+		if ((isDirty || mcPassed != oldMcPassed) && (datasetteButtonState != PiDevice::Datasette::Button::Play || !motorOn))
+		{
+			//Now perform the expensive tape counter calculation
+			prevTapeCounter = tapeCounter;
+			tapeCounter = datasette.TapeCounterSimulation();
+			if (prevTapeCounter != tapeCounter)
+				isDirty = true;
+		}
+		oldMcPassed = mcPassed;
+				
+		if (isDirty)
+		{
+			switch (datasetteButtonState)
+			{
+			case PiDevice::Datasette::Button::Play:
+				//Don't display anything during playback. The screen takes too long to update.
+				if (!motorOn)
+				{
+					DisplayLoadingMessage(fileBrowserSelectedName, tapeCounter);
+				}
+				break;
+			case PiDevice::Datasette::Button::Stop:
+					DisplayTwoRowsWithCounter("STOP @ %d", fileBrowserSelectedName, tapeCounter);
+				break;
+			case PiDevice::Datasette::Button::Rewind:
+					DisplayTwoRowsWithCounter("RWND %d", fileBrowserSelectedName, tapeCounter);
+				break;
+			case PiDevice::Datasette::Button::FastForward:
+					DisplayTwoRowsWithCounter("FFWD %d", fileBrowserSelectedName, tapeCounter);
+				break;
+			case PiDevice::Datasette::Button::Pause:
+			{
+				RGBA BkColour = RGBA(0, 0, 0, 0xFF);
+				screenLCD->Clear(BkColour);
+
+				int y = 0;
+				auto& bookmarks = datasette.Bookmarks();
+				if (selectedIndex >= bookmarks.BookmarkCount)
+					selectedIndex = -2;
+
+				for (int i = menuStartRow; i < menuStartRow + rows && i < bookmarks.BookmarkCount; ++i, ++y)
+				{
+					auto foreground = selectedIndex == i ? BLACK : WHITE;
+					auto background = selectedIndex == i ? WHITE : BLACK;
+
+					if (i == -2)
+						screenLCD->PrintText(false, 0, y * fontHeight, "ADD INDEX", foreground, background);
+					else if (i == -1)
+					{
+						screenLCD->PrintText(false, 0, y * fontHeight, "RESET COUNTER", foreground, background);
+					}
+					else
+					{
+						auto bookmarkName = bookmarks.Bookmarks[i]->Name();
+						screenLCD->PrintText(false, 0, y * fontHeight, const_cast<char*>(bookmarkName), foreground, background);
+					}
+				}
+
+				screenLCD->SwapBuffers();
+
+			}
+			break;
+			default:
+				break;
+			}
+		}
+
+
+		isDirty = false;
+
+		if (datasetteButtonState != PiDevice::Datasette::Button::Pause)
+		{
+			if (inputMappings->PlayTape())
+			{
+				isDirty = true;
+				datasette.SetButton(PiDevice::Datasette::Button::Play);
+				DisplayLoadingMessage(fileBrowserSelectedName, tapeCounter);
+			}
+			if (inputMappings->StopTape())
+			{
+				isDirty = true;
+				datasette.SetButton(datasetteButtonState == PiDevice::Datasette::Button::Stop ? PiDevice::Datasette::Button::Pause : PiDevice::Datasette::Button::Stop);
+			}
+			if (inputMappings->RewindTape())
+			{
+				isDirty = true;
+				datasette.SetButton(PiDevice::Datasette::Button::Rewind);
+			}
+			if (inputMappings->FastForwardTape())
+			{
+				isDirty = true;
+				datasette.SetButton(PiDevice::Datasette::Button::FastForward);
+			}
+
+			bool exitEmulation = inputMappings->Exit();
+			if (exitEmulation)
+			{
+				write32(ARM_GPIO_GPSET0, IEC_Bus::PIGPIO_MASK_OUT_DATASETTE_SENSE);
+
+				if (screenLCD != nullptr)
+				{
+					screenLCD->Clear(BLACK);
+					screenLCD->SwapBuffers();
+				}
+				return EXIT_KEYBOARD;
+			}
+		}
+		else
+		{
+			if (inputMappings->RewindTape())
+			{
+				isDirty = true;
+				--selectedIndex;
+				auto bmCount = datasette.Bookmarks().BookmarkCount;
+				if (selectedIndex < -2)
+				{
+					selectedIndex = bmCount - 1;
+					int mx = bmCount + 2;
+					currentScreenRow = mx <= rows ? mx - 1 : rows - 1;
+					menuStartRow = mx <= rows ? -2 : selectedIndex - 2;
+				}
+				else
+				{
+					--currentScreenRow;
+					if (currentScreenRow < 0)
+					{
+						currentScreenRow = 0;
+						--menuStartRow;
+					}
+				}
+			}
+			if (inputMappings->FastForwardTape())
+			{
+				isDirty = true;
+				++selectedIndex;
+				auto bmCount = datasette.Bookmarks().BookmarkCount;
+				if (selectedIndex >= bmCount)
+				{
+					selectedIndex = -2;
+					currentScreenRow = 0;
+					menuStartRow = -2;
+				}
+				else
+				{
+					++currentScreenRow;
+					if (currentScreenRow >= rows)
+					{
+						currentScreenRow = rows - 1;
+						++menuStartRow;
+					}
+				}
+			}
+
+			if (selectedIndex >= 0)
+			{
+				datasette.SelectBookmark(selectedIndex);
+			}
+
+			if (inputMappings->PlayTape())
+			{
+				isDirty = true;
+				if (selectedIndex >= 0)
+				{
+					datasette.MoveTapeToSelectedBookmark();
+					datasette.PreviousButton();
+				}
+				else if (selectedIndex == -1)
+					datasette.SetNewTapeStartPoint();
+				else if (selectedIndex == -2)
+					datasette.AddBookmark();
+			}
+
+			if (inputMappings->Exit())
+			{
+				isDirty = true;
+				datasette.PreviousButton();
+			}
+
+		}
+
+		prevButtonState = buttonState;
+
+		clears = 0;
+		sets = 0;
+
+		auto gpioIn = IEC_Bus::ReadGPIO(); //Get the IO for the datasette and refresh gplev0 for the button detection.
+		motorOn = (gpioIn & IEC_Bus::PIGPIO_MASK_IN_DATASETTE_MOTOR) != 0;
+		if (motorOn)
+		{
+			sets |= 1 << PIGPIO_OUT_LED;
+		}
+		else
+			clears |= 1 << PIGPIO_OUT_LED;
+
+		//Conversions between datasette and GPIO pins, map these directly in Datasette class if any speed improvements are needed.
+		auto outSignal = datasette.Signals(motorOn ? PiDevice::Datasette::SignalsFromC64::Motor : PiDevice::Datasette::SignalsFromC64::None);
+		auto readSignal = (static_cast<int>(outSignal) & static_cast<int>(PiDevice::Datasette::SignalsToC64::Read)) != 0;
+		auto senseSignal = (static_cast<int>(outSignal) & static_cast<int>(PiDevice::Datasette::SignalsToC64::Sense)) == 0;
+
+		if (readSignal)
+			sets |= IEC_Bus::PIGPIO_MASK_OUT_DATASETTE_READ;
+		else
+			clears |= IEC_Bus::PIGPIO_MASK_OUT_DATASETTE_READ;
+
+		if (senseSignal)
+			sets |= IEC_Bus::PIGPIO_MASK_OUT_DATASETTE_SENSE;
+		else
+		{
+			clears |= IEC_Bus::PIGPIO_MASK_OUT_DATASETTE_SENSE;
+		}
+
+		if (oldClears != clears)
+		{
+			write32(ARM_GPIO_GPCLR0, clears);
+			oldClears = clears;
+		}
+		if (oldSets != sets)
+		{
+			write32(ARM_GPIO_GPSET0, sets);
+			oldSets = sets;
+		}
+		
+	}
+
+	return EXIT_UNKNOWN;
+}
+#endif
 
 EXIT_TYPE Emulate1541(FileBrowser* fileBrowser)
 {
@@ -1308,7 +1711,18 @@ void emulator()
 							fileBrowser->Update();
 							// Check selections made via FileBrowser
 							if (fileBrowser->SelectionsMade())
+							{
+#if defined(TAPESUPPORT)
+								if (PiDevice::Datasette::IsTapeImageExtension(fileBrowser->LastSelectionName()))
+								{
+									emulating = EMULATING_DATASETTE;
+									fileBrowserSelectedName = fileBrowser->LastSelectionName();
+									inputMappings->WaitForClearButtons();
+								}
+								else
+#endif
 								emulating = BeginEmulating(fileBrowser, fileBrowser->LastSelectionName());
+							}
 							break;
 						case IEC_Commands::IMAGE_SELECTED:
 							// Check selections made via IEC commands (like fb64)
@@ -1338,6 +1752,15 @@ void emulator()
 								else
 									fileBrowserSelectedName = 0;
 							}
+#if defined(TAPESUPPORT)
+							else if (PiDevice::Datasette::IsTapeImageExtension(fileBrowserSelectedName))
+							{
+								const FILINFO* filInfoSelected = m_IEC_Commands.GetImageSelected();
+								DEBUG_LOG("IEC mounting tape %s\r\n", filInfoSelected->fname);
+								emulating = EMULATING_DATASETTE;
+								inputMappings->WaitForClearButtons();
+							}
+#endif
 							else
 							{
 								fileBrowserSelectedName = 0;
@@ -1380,7 +1803,18 @@ void emulator()
 				{
 					fileBrowser->Update();
 					if (fileBrowser->SelectionsMade())
-						emulating = BeginEmulating(fileBrowser, fileBrowser->LastSelectionName());
+					{
+#if defined(TAPESUPPORT)
+						if (PiDevice::Datasette::IsTapeImageExtension(fileBrowser->LastSelectionName()))
+						{
+							emulating = EMULATING_DATASETTE;
+							fileBrowserSelectedName = fileBrowser->LastSelectionName();
+							inputMappings->WaitForClearButtons();
+						}
+						else
+#endif
+							emulating = BeginEmulating(fileBrowser, fileBrowser->LastSelectionName());
+					}
 					usDelay(1);
 				}
 			}
@@ -1390,10 +1824,13 @@ void emulator()
 			if (emulating == EMULATING_1541)
 				exitReason = Emulate1541(fileBrowser);
 #if defined(PI1581SUPPORT)
-			else
+			else if (emulating == EMULATING_1581)
 				exitReason = Emulate1581(fileBrowser);
 #endif
-
+#if defined(TAPESUPPORT)
+			else if (emulating == EMULATING_DATASETTE)
+				exitReason = EmulateDatasette();
+#endif
 			DEBUG_LOG("Exited emulation\r\n");
 
 			// Clearing the caddy now
@@ -1830,39 +2267,6 @@ void UpdateFirmwareToSD()
 #endif
 }
 
-void DisplayMessage(int x, int y, bool LCD, const char* message, u32 textColour, u32 backgroundColour)
-{
-#if not defined(EXPERIMENTALZERO)
-	char buffer[256] = { 0 };
-
-	if (!LCD)
-	{
-		x = screen.ScaleX(x);
-		y = screen.ScaleY(y);
-
-		screen.PrintText(false, x, y, (char*)message, textColour, backgroundColour);
-	}
-	else if (screenLCD)
-	{
-		RGBA BkColour = RGBA(0, 0, 0, 0xFF);
-
-		core0RefreshingScreen.Acquire();
-
-		screenLCD->Clear(BkColour);
-		screenLCD->PrintText(false, x, y, (char*)message, textColour, backgroundColour);
-		screenLCD->SwapBuffers();
-
-		core0RefreshingScreen.Release();
-	}
-#else
-	RGBA BkColour = RGBA(0, 0, 0, 0xFF);
-
-	screenLCD->Clear(BkColour);
-	screenLCD->PrintText(false, x, y, (char*)message, textColour, backgroundColour);
-	screenLCD->SwapBuffers();
-
-#endif
-}
 
 extern "C"
 {
@@ -1986,6 +2390,11 @@ extern "C"
 		pi1541.drive.SetVIA(&pi1541.VIA[1]);
 		pi1541.VIA[0].GetPortB()->SetPortOut(0, IEC_Bus::PortB_OnPortOut);
 		IEC_Bus::Initialise();
+		
+#if defined(TAPESUPPORT)
+		write32(ARM_GPIO_GPSET0, IEC_Bus::PIGPIO_MASK_OUT_DATASETTE_SENSE);
+#endif
+
 		if (screenLCD)
 			screenLCD->ClearInit(0);
 

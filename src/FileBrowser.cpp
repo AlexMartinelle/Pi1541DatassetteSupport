@@ -27,6 +27,14 @@
 #include "InputMappings.h"
 #include "stb_image.h"
 #include "Petscii.h"
+#if not defined(TAPESUPPORT)
+#define TAPESUPPORT 1
+#endif
+
+#if defined(TAPESUPPORT)
+#include "Datasette.h"
+#endif
+
 extern "C"
 {
 #include "rpi-gpio.h"
@@ -1161,27 +1169,41 @@ void FileBrowser::UpdateInputFolders()
 			}
 			else // not a directory
 			{
-				if (DiskImage::IsDiskImageExtention(current->filImage.fname))
+
+#if defined(TAPESUPPORT)
+				if (PiDevice::Datasette::IsTapeImageExtension(current->filImage.fname))
 				{
-					DiskImage::DiskType diskType = DiskImage::GetDiskImageTypeViaExtention(current->filImage.fname);
-
-					// Should also be able to create a LST file from all the images currently selected in the caddy
-					if (diskType == DiskImage::LST)
-					{
-						selectionsMade = SelectLST(current->filImage.fname);
-					}
-					else
-					{
-						// Add the current selected
-						AddToCaddy(current);
-						selectionsMade = FillCaddyWithSelections();
-					}
-
-					if (selectionsMade)
-						lastSelectionName = current->filImage.fname;
-
+					selectionsMade = true;
+					lastSelectionName = current->filImage.fname;
 					dirty = true;
 				}
+				else
+				{
+#endif
+					if (DiskImage::IsDiskImageExtention(current->filImage.fname))
+					{
+						DiskImage::DiskType diskType = DiskImage::GetDiskImageTypeViaExtention(current->filImage.fname);
+
+						// Should also be able to create a LST file from all the images currently selected in the caddy
+						if (diskType == DiskImage::LST)
+						{
+							selectionsMade = SelectLST(current->filImage.fname);
+						}
+						else
+						{
+							// Add the current selected
+							AddToCaddy(current);
+							selectionsMade = FillCaddyWithSelections();
+						}
+
+						if (selectionsMade)
+							lastSelectionName = current->filImage.fname;
+
+						dirty = true;
+					}
+#if defined(TAPESUPPORT)
+				}
+#endif
 			}
 		}
 	}
