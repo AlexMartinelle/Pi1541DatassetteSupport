@@ -1,3 +1,7 @@
+A precompiled kernel for a Pi Zero Pi1541 option b hat with datasette support can be found here: http://www.cogitarecomputing.com/pi1541/PiZeroPi1541KernelWithDatasetteSupport.zip
+The required PCB design can be found here: https://github.com/AlexMartinelle/Pi1541ZeroDatassettePCB/tree/main
+
+
 # Pi1541
 
 Commodore 1541/1581 emulator for the Raspberry Pi
